@@ -1,0 +1,212 @@
+version: "3.9"
+
+services:
+  # ============================================================
+  # DATABASES
+  # ============================================================
+  
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    container_name: insider-clickhouse
+    ports:
+      - "8123:8123"   # HTTP interface
+      - "9000:9000"   # Native interface
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./init/clickhouse:/docker-entrypoint-initdb.d
+    environment:
+      CLICKHOUSE_DB: ethereum
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  qdrant:
+    image: qdrant/qdrant:v1.11.0
+    container_name: insider-qdrant
+    ports:
+      - "6333:6333"   # REST API
+      - "6334:6334"   # gRPC
+    volumes:
+      - qdrant_data:/qdrant/storage
+      - ./init/qdrant:/qdrant/init
+    environment:
+      QDRANT__SERVICE__GRPC_PORT: 6334
+      QDRANT__SERVICE__HTTP_PORT: 6333
+      QDRANT__STORAGE__STORAGE_PATH: /qdrant/storage
+      QDRANT__LOG_LEVEL: INFO
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  neo4j:
+    image: neo4j:5.24-community
+    container_name: insider-neo4j
+    ports:
+      - "7474:7474"   # HTTP
+      - "7687:7687"   # Bolt
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+      - ./init/neo4j:/var/lib/neo4j/import
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-password}
+      NEO4J_PLUGINS: '["graph-data-science"]'
+      NEO4J_dbms_security_procedures_unrestricted: gds.*
+      NEO4J_dbms_memory_heap_initial__size: 1G
+      NEO4J_dbms_memory_heap_max__size: 2G
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7474"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: insider-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ============================================================
+  # MESSAGE QUEUE (for Celery)
+  # ============================================================
+  
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: insider-rabbitmq
+    ports:
+      - "5672:5672"   # AMQP
+      - "15672:15672" # Management UI
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_running"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ============================================================
+  # APPLICATION SERVICES
+  # ============================================================
+  
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: insider-api
+    ports:
+      - "8080:8080"
+    volumes:
+      - ../src:/app/src
+      - ../config:/app/config
+    environment:
+      - ENVIRONMENT=development
+      - DB_CLICKHOUSE_HOST=clickhouse
+      - DB_QDRANT_HOST=qdrant
+      - DB_NEO4J_URI=bolt://neo4j:7687
+      - DB_REDIS_HOST=redis
+      - LLM_ENDPOINT=${LLM_ENDPOINT:-http://host.docker.internal:8000/v1}
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: insider-worker
+    command: celery -A src.worker worker --loglevel=info
+    volumes:
+      - ../src:/app/src
+      - ../config:/app/config
+    environment:
+      - ENVIRONMENT=development
+      - DB_CLICKHOUSE_HOST=clickhouse
+      - DB_QDRANT_HOST=qdrant
+      - DB_NEO4J_URI=bolt://neo4j:7687
+      - DB_REDIS_HOST=redis
+      - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672//
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+    depends_on:
+      - api
+      - rabbitmq
+      - redis
+
+  # ============================================================
+  # MONITORING (Optional for development)
+  # ============================================================
+  
+  prometheus:
+    image: prom/prometheus:v2.54.0
+    container_name: insider-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    profiles:
+      - monitoring
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: insider-grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    depends_on:
+      - prometheus
+    profiles:
+      - monitoring
+
+volumes:
+  clickhouse_data:
+  qdrant_data:
+  neo4j_data:
+  neo4j_logs:
+  redis_data:
+  rabbitmq_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  default:
+    name: insider-network
