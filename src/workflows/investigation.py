@@ -10,22 +10,24 @@ from typing import Literal
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 
-from src.agents.state import InvestigationState
+from src.agents.state import InvestigationState, create_initial_state
 
 
 def route_after_retrieval(state: InvestigationState) -> Literal["graph_analysis", "anomaly_detection", "error_handler"]:
     """Determine next step based on retrieval results."""
-    if state.error:
+    # Access TypedDict state using dict methods
+    if state.get("error"):
         return "error_handler"
 
-    intent = state.intent or ""
+    intent = state.get("intent") or ""
 
     # Graph analysis needed for flow/cluster investigations
     if intent in ["flow_analysis", "cluster_investigation", "wallet_tracing"]:
         return "graph_analysis"
 
     # Sufficient evidence for anomaly detection
-    if len(state.fused_evidence) > 0:
+    fused_evidence = state.get("fused_evidence", [])
+    if len(fused_evidence) > 0:
         return "anomaly_detection"
 
     return "error_handler"
@@ -33,15 +35,19 @@ def route_after_retrieval(state: InvestigationState) -> Literal["graph_analysis"
 
 def route_after_validation(state: InvestigationState) -> Literal["report_generator", "retrieval", "error_handler"]:
     """Determine next step based on validation results."""
-    validation = state.validation_result
+    # Access TypedDict state using dict methods
+    validation = state.get("validation_result")
 
     if validation is None:
         return "error_handler"
 
-    if validation.all_valid:
+    # Handle both Pydantic model and dict
+    all_valid = validation.all_valid if hasattr(validation, 'all_valid') else validation.get("all_valid", False)
+    if all_valid:
         return "report_generator"
 
-    if state.validation_attempts >= 3:
+    validation_attempts = state.get("validation_attempts", 0)
+    if validation_attempts >= 3:
         return "error_handler"
 
     # Retry with stricter constraints
@@ -50,7 +56,7 @@ def route_after_validation(state: InvestigationState) -> Literal["report_generat
 
 def should_continue_to_graph(state: InvestigationState) -> bool:
     """Check if graph analysis is needed based on entities."""
-    entities = state.entities
+    entities = state.get("entities", {})
     return bool(
         entities.get("addresses")
         or entities.get("trace_flow")
@@ -212,11 +218,11 @@ class InvestigationRunner:
         """
         import uuid
 
-        # Initialize state
-        initial_state = InvestigationState(
+        # Initialize state using helper function (TypedDict)
+        initial_state = create_initial_state(
             query=query,
             user_id=user_id,
-            config=config or {},
+            config=config,
         )
 
         # Create thread config for checkpointing
@@ -226,9 +232,9 @@ class InvestigationRunner:
             }
         }
 
-        # Run the workflow
+        # Run the workflow - TypedDict is already a dict
         final_state = await self.workflow.ainvoke(
-            initial_state.model_dump(),
+            initial_state,
             config=thread_config,
         )
 

@@ -1,7 +1,7 @@
 """Shared state definitions for multi-agent workflows."""
 
 from datetime import datetime
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, TypedDict
 
 from langgraph.graph.message import add_messages
 from pydantic import BaseModel, Field
@@ -14,6 +14,8 @@ class Citation(BaseModel):
     value: str
     context: str = Field(default="", description="How this citation supports the claim")
 
+    model_config = {"frozen": False}
+
 
 class Evidence(BaseModel):
     """A piece of evidence from database retrieval."""
@@ -22,6 +24,8 @@ class Evidence(BaseModel):
     data: dict[str, Any]
     relevance_score: float = Field(ge=0.0, le=1.0)
     citations: list[Citation] = Field(default_factory=list)
+
+    model_config = {"frozen": False}
 
 
 class Finding(BaseModel):
@@ -34,6 +38,8 @@ class Finding(BaseModel):
     citations: list[Citation] = Field(min_length=1)
     is_inference: bool = False
     evidence: list[Evidence] = Field(default_factory=list)
+
+    model_config = {"frozen": False}
 
 
 class AnomalyResult(BaseModel):
@@ -48,6 +54,8 @@ class AnomalyResult(BaseModel):
     observed_value: float
     time_window: tuple[datetime, datetime]
 
+    model_config = {"frozen": False}
+
 
 class ClusterInfo(BaseModel):
     """Wallet cluster information."""
@@ -57,6 +65,8 @@ class ClusterInfo(BaseModel):
     size: int
     central_addresses: list[str]
     total_volume: float
+
+    model_config = {"frozen": False}
 
 
 class FlowPath(BaseModel):
@@ -69,6 +79,8 @@ class FlowPath(BaseModel):
     total_value: float
     transactions: list[str]
 
+    model_config = {"frozen": False}
+
 
 class ValidationResult(BaseModel):
     """Result of citation validation."""
@@ -78,6 +90,8 @@ class ValidationResult(BaseModel):
     verified_count: int
     failed_citations: list[dict[str, Any]] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+
+    model_config = {"frozen": False}
 
 
 class AnalysisReport(BaseModel):
@@ -93,48 +107,77 @@ class AnalysisReport(BaseModel):
     limitations: list[str]
     raw_evidence_count: int
 
+    model_config = {"frozen": False}
 
-class InvestigationState(BaseModel):
+
+class InvestigationState(TypedDict, total=False):
     """
     Shared state for investigation workflow.
     
     This state is passed between agents in the LangGraph workflow,
     accumulating evidence and analysis results.
+    
+    Uses TypedDict for LangGraph 0.2+ compatibility.
     """
 
-    # Input
+    # Input (required)
     query: str
     user_id: str
-    config: dict[str, Any] = Field(default_factory=dict)
-    started_at: datetime = Field(default_factory=datetime.utcnow)
+
+    # Input (optional)
+    config: dict[str, Any]
+    started_at: datetime
 
     # Parsed intent
-    intent: str | None = None
-    entities: dict[str, Any] = Field(default_factory=dict)
+    intent: str | None
+    entities: dict[str, Any]
 
     # Retrieved evidence
-    semantic_results: list[dict[str, Any]] = Field(default_factory=list)
-    graph_results: list[dict[str, Any]] = Field(default_factory=list)
-    olap_results: list[dict[str, Any]] = Field(default_factory=list)
-    fused_evidence: list[Evidence] = Field(default_factory=list)
+    semantic_results: list[dict[str, Any]]
+    graph_results: list[dict[str, Any]]
+    olap_results: list[dict[str, Any]]
+    fused_evidence: list[Evidence]
 
     # Analysis results
-    anomalies: list[AnomalyResult] = Field(default_factory=list)
-    clusters: list[ClusterInfo] = Field(default_factory=list)
-    flow_paths: list[FlowPath] = Field(default_factory=list)
+    anomalies: list[AnomalyResult]
+    clusters: list[ClusterInfo]
+    flow_paths: list[FlowPath]
 
     # Validation
-    validation_result: ValidationResult | None = None
-    validation_attempts: int = 0
+    validation_result: ValidationResult | None
+    validation_attempts: int
 
     # Output
-    report: AnalysisReport | None = None
-    error: str | None = None
+    report: AnalysisReport | None
+    error: str | None
 
-    # Workflow control
-    messages: Annotated[list[Any], add_messages] = Field(default_factory=list)
-    next_agent: str | None = None
-    checkpoints: list[str] = Field(default_factory=list)
+    # Workflow control - messages uses LangGraph's add_messages reducer
+    messages: Annotated[list[Any], add_messages]
+    next_agent: str | None
+    checkpoints: list[str]
 
-    class Config:
-        arbitrary_types_allowed = True
+
+def create_initial_state(query: str, user_id: str, config: dict | None = None) -> InvestigationState:
+    """Create a new investigation state with default values."""
+    return InvestigationState(
+        query=query,
+        user_id=user_id,
+        config=config or {},
+        started_at=datetime.utcnow(),
+        intent=None,
+        entities={},
+        semantic_results=[],
+        graph_results=[],
+        olap_results=[],
+        fused_evidence=[],
+        anomalies=[],
+        clusters=[],
+        flow_paths=[],
+        validation_result=None,
+        validation_attempts=0,
+        report=None,
+        error=None,
+        messages=[],
+        next_agent=None,
+        checkpoints=[],
+    )

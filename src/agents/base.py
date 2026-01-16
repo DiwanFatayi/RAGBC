@@ -37,6 +37,9 @@ class BaseAgent(ABC):
     - Error handling
     - Metrics collection
     - Logging
+    
+    Note: InvestigationState is a TypedDict for LangGraph compatibility.
+    Access fields using dict syntax: state["field"] or state.get("field", default)
     """
 
     name: str = "base_agent"
@@ -59,7 +62,7 @@ class BaseAgent(ABC):
         Process the current state and return updates.
         
         Args:
-            state: Current investigation state
+            state: Current investigation state (TypedDict)
             
         Returns:
             Dictionary of state updates to apply
@@ -73,7 +76,8 @@ class BaseAgent(ABC):
         This is the entry point called by LangGraph.
         """
         start_time = datetime.utcnow()
-        self._logger.info("agent_started", query=state.query[:100])
+        query = state.get("query", "")
+        self._logger.info("agent_started", query=query[:100] if query else "")
 
         try:
             # Execute with timeout
@@ -93,9 +97,10 @@ class BaseAgent(ABC):
                 updates=list(result.keys()),
             )
 
-            # Add checkpoint
-            result.setdefault("checkpoints", state.checkpoints.copy())
-            result["checkpoints"].append(f"{self.name}:{datetime.utcnow().isoformat()}")
+            # Add checkpoint - state is TypedDict, use .get() for safe access
+            existing_checkpoints = list(state.get("checkpoints", []))
+            existing_checkpoints.append(f"{self.name}:{datetime.utcnow().isoformat()}")
+            result["checkpoints"] = existing_checkpoints
 
             return result
 

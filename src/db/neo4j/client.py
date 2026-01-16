@@ -144,25 +144,56 @@ class Neo4jClient:
         max_depth: int = 3,
     ) -> list[dict[str, Any]]:
         """Find all wallets in the same cluster as the given address."""
-        cypher = """
-        MATCH (start:Wallet {address: $address})
-        CALL gds.wcc.stream({
-            nodeProjection: 'Wallet',
-            relationshipProjection: 'TRANSFERRED'
-        })
-        YIELD nodeId, componentId
-        WITH start, componentId as startComponent
-        WHERE gds.util.asNode(nodeId) = start
+        import uuid
         
-        CALL gds.wcc.stream({
-            nodeProjection: 'Wallet',
-            relationshipProjection: 'TRANSFERRED'
-        })
-        YIELD nodeId, componentId
-        WHERE componentId = startComponent
-        RETURN gds.util.asNode(nodeId).address as address
-        """
-        return await self.query(cypher, {"address": address})
+        graph_name = f"wcc-temp-{uuid.uuid4().hex[:8]}"
+        
+        try:
+            # Create named graph projection (GDS 2.x syntax)
+            await self.execute(
+                """
+                CALL gds.graph.project(
+                    $graph_name,
+                    'Wallet',
+                    'TRANSFERRED'
+                )
+                """,
+                {"graph_name": graph_name},
+            )
+            
+            # Run WCC and find the component containing our address
+            results = await self.query(
+                """
+                CALL gds.wcc.stream($graph_name)
+                YIELD nodeId, componentId
+                WITH gds.util.asNode(nodeId) AS node, componentId
+                WITH node.address AS addr, componentId
+                WITH collect({address: addr, component: componentId}) AS allNodes
+                
+                // Find the component of our target address
+                UNWIND allNodes AS n
+                WITH allNodes, n.component AS targetComponent
+                WHERE n.address = $address
+                
+                // Return all addresses in the same component
+                UNWIND allNodes AS node
+                WHERE node.component = targetComponent
+                RETURN node.address AS address
+                """,
+                {"graph_name": graph_name, "address": address},
+            )
+            
+            return results
+            
+        finally:
+            # Always clean up the projection
+            try:
+                await self.execute(
+                    "CALL gds.graph.drop($graph_name, false)",
+                    {"graph_name": graph_name},
+                )
+            except Exception:
+                pass  # Ignore cleanup errors
 
     async def trace_fund_flow(
         self,
@@ -171,9 +202,11 @@ class Neo4jClient:
         max_hops: int = 5,
     ) -> list[dict[str, Any]]:
         """Find fund flow paths between two addresses."""
-        cypher = """
+        # Note: Cypher doesn't support parameterized relationship length
+        # We use a safe range and filter in the query
+        cypher = f"""
         MATCH path = shortestPath(
-            (source:Wallet {address: $source})-[:TRANSFERRED*1..$max_hops]->(target:Wallet {address: $target})
+            (source:Wallet {{address: $source}})-[:TRANSFERRED*1..{max_hops}]->(target:Wallet {{address: $target}})
         )
         RETURN 
             [n IN nodes(path) | n.address] as addresses,
@@ -184,48 +217,98 @@ class Neo4jClient:
         """
         return await self.query(
             cypher,
-            {"source": source, "target": target, "max_hops": max_hops},
+            {"source": source, "target": target},
         )
 
     async def run_louvain_clustering(self) -> list[dict[str, Any]]:
         """Run Louvain community detection algorithm."""
-        # First project the graph
-        await self.execute("""
-            CALL gds.graph.project(
-                'wallet-graph',
-                'Wallet',
-                'TRANSFERRED',
-                {relationshipProperties: 'total_value'}
+        import uuid
+        
+        graph_name = f"louvain-{uuid.uuid4().hex[:8]}"
+        
+        try:
+            # Create named graph projection with relationship property (GDS 2.x syntax)
+            await self.execute(
+                """
+                CALL gds.graph.project(
+                    $graph_name,
+                    'Wallet',
+                    {
+                        TRANSFERRED: {
+                            properties: 'total_value'
+                        }
+                    }
+                )
+                """,
+                {"graph_name": graph_name},
             )
-        """)
 
-        # Run Louvain
-        results = await self.query("""
-            CALL gds.louvain.stream('wallet-graph', {
-                relationshipWeightProperty: 'total_value'
-            })
-            YIELD nodeId, communityId
-            RETURN gds.util.asNode(nodeId).address as address, communityId
-        """)
+            # Run Louvain
+            results = await self.query(
+                """
+                CALL gds.louvain.stream($graph_name, {
+                    relationshipWeightProperty: 'total_value'
+                })
+                YIELD nodeId, communityId
+                RETURN gds.util.asNode(nodeId).address as address, communityId
+                """,
+                {"graph_name": graph_name},
+            )
 
-        # Drop the projection
-        await self.execute("CALL gds.graph.drop('wallet-graph')")
-
-        return results
+            return results
+            
+        finally:
+            # Always clean up the projection
+            try:
+                await self.execute(
+                    "CALL gds.graph.drop($graph_name, false)",
+                    {"graph_name": graph_name},
+                )
+            except Exception:
+                pass
 
     async def get_pagerank(self, top_n: int = 100) -> list[dict[str, Any]]:
         """Get PageRank scores for wallets."""
-        cypher = """
-        CALL gds.pageRank.stream({
-            nodeProjection: 'Wallet',
-            relationshipProjection: 'TRANSFERRED'
-        })
-        YIELD nodeId, score
-        RETURN gds.util.asNode(nodeId).address as address, score
-        ORDER BY score DESC
-        LIMIT $top_n
-        """
-        return await self.query(cypher, {"top_n": top_n})
+        import uuid
+        
+        graph_name = f"pagerank-{uuid.uuid4().hex[:8]}"
+        
+        try:
+            # Create named graph projection (GDS 2.x syntax)
+            await self.execute(
+                """
+                CALL gds.graph.project(
+                    $graph_name,
+                    'Wallet',
+                    'TRANSFERRED'
+                )
+                """,
+                {"graph_name": graph_name},
+            )
+            
+            # Run PageRank
+            results = await self.query(
+                """
+                CALL gds.pageRank.stream($graph_name)
+                YIELD nodeId, score
+                RETURN gds.util.asNode(nodeId).address as address, score
+                ORDER BY score DESC
+                LIMIT $top_n
+                """,
+                {"graph_name": graph_name, "top_n": top_n},
+            )
+            
+            return results
+            
+        finally:
+            # Always clean up the projection
+            try:
+                await self.execute(
+                    "CALL gds.graph.drop($graph_name, false)",
+                    {"graph_name": graph_name},
+                )
+            except Exception:
+                pass
 
 
 # Singleton instance

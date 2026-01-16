@@ -222,15 +222,20 @@ class ValidatorAgent(BaseAgent):
         # Collect all text that needs validation
         texts_to_validate = []
 
-        # Evidence descriptions
-        for evidence in state.fused_evidence:
-            if evidence.citations:
-                for citation in evidence.citations:
-                    texts_to_validate.append(f"[{citation.type.upper()}:{citation.value}]")
+        # Evidence descriptions - access TypedDict using dict methods
+        fused_evidence = state.get("fused_evidence", [])
+        for evidence in fused_evidence:
+            citations = evidence.citations if hasattr(evidence, 'citations') else evidence.get("citations", [])
+            for citation in citations:
+                cit_type = citation.type if hasattr(citation, 'type') else citation.get("type", "")
+                cit_value = citation.value if hasattr(citation, 'value') else citation.get("value", "")
+                texts_to_validate.append(f"[{cit_type.upper()}:{cit_value}]")
 
         # Anomaly descriptions
-        for anomaly in state.anomalies:
-            texts_to_validate.append(f"[ADDR:{anomaly.address}]")
+        anomalies = state.get("anomalies", [])
+        for anomaly in anomalies:
+            addr = anomaly.address if hasattr(anomaly, 'address') else anomaly.get("address", "")
+            texts_to_validate.append(f"[ADDR:{addr}]")
 
         # Combine all text
         combined_text = " ".join(texts_to_validate)
@@ -314,7 +319,7 @@ class ValidatorAgent(BaseAgent):
 
         return {
             "validation_result": validation_result,
-            "validation_attempts": state.validation_attempts + 1,
+            "validation_attempts": state.get("validation_attempts", 0) + 1,
         }
 
     async def _verify_with_metadata(

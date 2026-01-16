@@ -52,9 +52,10 @@ class RetrievalAgent(BaseAgent):
 
     async def process(self, state: InvestigationState) -> dict[str, Any]:
         """Execute hybrid retrieval based on parsed intent and entities."""
-        query = state.query
-        intent = state.intent
-        entities = state.entities
+        # Access TypedDict state using dict methods
+        query = state.get("query", "")
+        intent = state.get("intent")
+        entities = state.get("entities", {})
 
         self._logger.info(
             "starting_retrieval",
@@ -73,7 +74,10 @@ class RetrievalAgent(BaseAgent):
         if entities.get("addresses"):
             graph_task = self._graph_search(entities)
         else:
-            graph_task = asyncio.coroutine(lambda: [])()
+            # Create a coroutine that returns empty list
+            async def _empty_result() -> list:
+                return []
+            graph_task = _empty_result()
 
         results = await asyncio.gather(
             semantic_task,
